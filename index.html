@@ -1308,9 +1308,35 @@ function completeOrder(o, by) {
 let AC = null, SFX_BUS = null, MUS_BUS = null;
 function ac() {
   if (!AC) { try { AC = new (window.AudioContext || window.webkitAudioContext)(); SFX_BUS = AC.createGain(); SFX_BUS.gain.value = 1; SFX_BUS.connect(AC.destination); MUS_BUS = AC.createGain(); MUS_BUS.gain.value = .55; MUS_BUS.connect(AC.destination); } catch (e) {} }
-  if (AC && AC.state === "suspended") { try { AC.resume(); } catch (e) {} }
+  // iOS also uses the "interrupted" state (after a call / app switch) — resume from anything that isn't running
+  if (AC && AC.state !== "running" && AC.state !== "closed") { try { const r = AC.resume(); if (r && r.catch) r.catch(() => {}); } catch (e) {} }
   return AC;
 }
+/* ---- iPhone / iPad: make sound work with the silent switch on and after interruptions */
+// Safari 17+: an explicit "playback" session ignores the ring/silent switch (like a music app)
+try { if (navigator.audioSession) navigator.audioSession.type = "playback"; } catch (e) {}
+// older iOS: a looping silent <audio> element switches the page's audio session to "playback"
+let SILENT_EL = null;
+function silentWavUrl() {
+  const n = 8000, b = new DataView(new ArrayBuffer(44 + n)), w = (o, t) => { for (let i = 0; i < t.length; i++) b.setUint8(o + i, t.charCodeAt(i)); };
+  w(0, "RIFF"); b.setUint32(4, 36 + n, true); w(8, "WAVE"); w(12, "fmt "); b.setUint32(16, 16, true); b.setUint16(20, 1, true); b.setUint16(22, 1, true);
+  b.setUint32(24, 8000, true); b.setUint32(28, 8000, true); b.setUint16(32, 1, true); b.setUint16(34, 8, true); w(36, "data"); b.setUint32(40, n, true);
+  for (let i = 0; i < n; i++) b.setUint8(44 + i, 128);
+  return URL.createObjectURL(new Blob([b.buffer], {type: "audio/wav"}));
+}
+const IS_IOS = /iP(hone|ad|od)/.test(navigator.userAgent) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+function unlockAudio() {
+  if (typeof S === "undefined" || !S || (!S.sound && !S.music)) return;
+  const a = ac(); if (!a) return;
+  // a one-sample buffer played inside the gesture "unlocks" WebAudio on old iOS
+  try { const src = a.createBufferSource(); src.buffer = a.createBuffer(1, 1, 22050); src.connect(a.destination); src.start(0); } catch (e) {}
+  if (IS_IOS) {
+    if (!SILENT_EL) { SILENT_EL = new Audio(silentWavUrl()); SILENT_EL.loop = true; SILENT_EL.setAttribute("playsinline", ""); SILENT_EL.preload = "auto"; }
+    if (SILENT_EL.paused) { const p = SILENT_EL.play(); if (p && p.catch) p.catch(() => {}); }
+  }
+  if (S.music && typeof MUS !== "undefined" && !MUS.on && !document.hidden && !$("#splash")) musicStart(MUS.track || 0);
+}
+["touchend", "click", "keydown"].forEach(ev => document.addEventListener(ev, unlockAudio, {capture: true, passive: true}));
 function tone(f, d, type = "sine", v = .1, slide = 0, when = 0, bus) { if (!S.sound && !bus) return; const a = ac(); if (!a) return; const t = a.currentTime + when; const o = a.createOscillator(), g = a.createGain(); o.type = type; o.frequency.setValueAtTime(f, t); if (slide) o.frequency.exponentialRampToValueAtTime(Math.max(30, f * slide), t + d); g.gain.setValueAtTime(v, t); g.gain.exponentialRampToValueAtTime(.001, t + d); o.connect(g).connect(bus || SFX_BUS); o.start(t); o.stop(t + d + .02); }
 const NOISE = {};
 function noiseBuf(d) { const a = ac(); const k = Math.round(d * 100); if (NOISE[k]) return NOISE[k]; const n = a.createBuffer(1, Math.max(1, a.sampleRate * d), a.sampleRate), ch = n.getChannelData(0); for (let i = 0; i < ch.length; i++) ch[i] = Math.random() * 2 - 1; return NOISE[k] = n; }
@@ -1398,7 +1424,12 @@ function musicStart(track = 0) {
   MUS.iv = setInterval(() => { if (!MUS.on) return; while (MUS.next < AC.currentTime + .15) { musicStep(T, MUS.step, MUS.next); MUS.next += 60 / T.bpm / 4; MUS.step++; } }, 30);
 }
 function musicStop() { MUS.on = false; clearInterval(MUS.iv); }
-document.addEventListener("visibilitychange", () => { if (!AC) return; if (document.hidden) AC.suspend(); else if (S.sound || S.music) AC.resume(); });
+document.addEventListener("visibilitychange", () => {
+  if (!AC) return;
+  if (document.hidden) { try { AC.suspend(); } catch (e) {} if (SILENT_EL) SILENT_EL.pause(); }
+  else if (S.sound || S.music) ac();     // may be refused outside a gesture on iOS — the next tap resumes it (unlockAudio)
+});
+window.addEventListener("pageshow", () => { if (AC && (S.sound || S.music)) ac(); });
 
 /* ============================ HERO: layered sprite composer ============================ */
 const ACT_POSE = {roll: "roll", smooth: "smooth", kneel: "kneel", drill: "drill", drill_up: "drillup", swing: "swing", screw: "screw", dig: "dig", trowel: "trowel",
