@@ -1307,36 +1307,43 @@ function completeOrder(o, by) {
 /* ============================ AUDIO: synth SFX + procedural music ============================ */
 let AC = null, SFX_BUS = null, MUS_BUS = null;
 function ac() {
-  if (!AC) { try { AC = new (window.AudioContext || window.webkitAudioContext)(); SFX_BUS = AC.createGain(); SFX_BUS.gain.value = 1; SFX_BUS.connect(AC.destination); MUS_BUS = AC.createGain(); MUS_BUS.gain.value = .55; MUS_BUS.connect(AC.destination); } catch (e) {} }
+  if (!AC) { mediaSession(); try { AC = new (window.AudioContext || window.webkitAudioContext)(); SFX_BUS = AC.createGain(); SFX_BUS.gain.value = 1; SFX_BUS.connect(AC.destination); MUS_BUS = AC.createGain(); MUS_BUS.gain.value = .55; MUS_BUS.connect(AC.destination); } catch (e) {} }
   // iOS also uses the "interrupted" state (after a call / app switch) — resume from anything that isn't running
   if (AC && AC.state !== "running" && AC.state !== "closed") { try { const r = AC.resume(); if (r && r.catch) r.catch(() => {}); } catch (e) {} }
   return AC;
 }
-/* ---- iPhone / iPad: make sound work with the silent switch on and after interruptions */
-// Safari 17+: an explicit "playback" session ignores the ring/silent switch (like a music app)
-try { if (navigator.audioSession) navigator.audioSession.type = "playback"; } catch (e) {}
-// older iOS: a looping silent <audio> element switches the page's audio session to "playback"
-let SILENT_EL = null;
-function silentWavUrl() {
-  const n = 8000, b = new DataView(new ArrayBuffer(44 + n)), w = (o, t) => { for (let i = 0; i < t.length; i++) b.setUint8(o + i, t.charCodeAt(i)); };
-  w(0, "RIFF"); b.setUint32(4, 36 + n, true); w(8, "WAVE"); w(12, "fmt "); b.setUint32(16, 16, true); b.setUint16(20, 1, true); b.setUint16(22, 1, true);
-  b.setUint32(24, 8000, true); b.setUint32(28, 8000, true); b.setUint16(32, 1, true); b.setUint16(34, 8, true); w(36, "data"); b.setUint32(40, n, true);
-  for (let i = 0; i < n; i++) b.setUint8(44 + i, 128);
-  return URL.createObjectURL(new Blob([b.buffer], {type: "audio/wav"}));
-}
+/* ---- iPhone / iPad: play through the MEDIA channel (media volume, works with the silent switch on) */
+// By default Safari treats Web Audio like a ringtone ("ambient"): silent switch = no sound, ringer volume.
+// iOS 17+: declare the page's audio as media playback — inside a user gesture, before the AudioContext starts.
+function mediaSession() { try { if (navigator.audioSession && navigator.audioSession.type !== "playback") navigator.audioSession.type = "playback"; } catch (e) {} }
+// iOS < 17 (and as a backup): a looping silent <audio> in the page moves the whole page onto the media channel.
 const IS_IOS = /iP(hone|ad|od)/.test(navigator.userAgent) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+let SILENT_EL = null;
+function silentEl() {
+  if (SILENT_EL) return SILENT_EL;
+  const n = 32, b = new Uint8Array(44 + n), dv = new DataView(b.buffer), w = (o, t) => { for (let i = 0; i < t.length; i++) b[o + i] = t.charCodeAt(i); };
+  w(0, "RIFF"); dv.setUint32(4, 36 + n, true); w(8, "WAVE"); w(12, "fmt "); dv.setUint32(16, 16, true); dv.setUint16(20, 1, true); dv.setUint16(22, 1, true);
+  dv.setUint32(24, 8000, true); dv.setUint32(28, 8000, true); dv.setUint16(32, 1, true); dv.setUint16(34, 8, true); w(36, "data"); dv.setUint32(40, n, true);
+  b.fill(128, 44);
+  let bin = ""; for (const c of b) bin += String.fromCharCode(c);
+  const el = document.createElement("audio");
+  el.src = "data:audio/wav;base64," + btoa(bin);
+  el.loop = true; el.preload = "auto"; el.controls = false; el.disableRemotePlayback = true;
+  el.setAttribute("playsinline", ""); el.setAttribute("webkit-playsinline", ""); el.setAttribute("x-webkit-airplay", "deny");
+  el.style.cssText = "position:absolute;width:1px;height:1px;opacity:0;pointer-events:none;left:-9px;top:-9px";
+  document.body.appendChild(el); el.load();
+  return SILENT_EL = el;
+}
 function unlockAudio() {
   if (typeof S === "undefined" || !S || (!S.sound && !S.music)) return;
-  const a = ac(); if (!a) return;
-  // a one-sample buffer played inside the gesture "unlocks" WebAudio on old iOS
+  mediaSession();                                                   // 1) media channel first
+  if (IS_IOS) { const el = silentEl(); if (el.paused) { const p = el.play(); if (p && p.catch) p.catch(() => {}); } }   // 2) silent media track
+  const a = ac(); if (!a) return;                                   // 3) create / resume the context inside the gesture
   try { const src = a.createBufferSource(); src.buffer = a.createBuffer(1, 1, 22050); src.connect(a.destination); src.start(0); } catch (e) {}
-  if (IS_IOS) {
-    if (!SILENT_EL) { SILENT_EL = new Audio(silentWavUrl()); SILENT_EL.loop = true; SILENT_EL.setAttribute("playsinline", ""); SILENT_EL.preload = "auto"; }
-    if (SILENT_EL.paused) { const p = SILENT_EL.play(); if (p && p.catch) p.catch(() => {}); }
-  }
   if (S.music && typeof MUS !== "undefined" && !MUS.on && !document.hidden && !$("#splash")) musicStart(MUS.track || 0);
 }
-["touchend", "click", "keydown"].forEach(ev => document.addEventListener(ev, unlockAudio, {capture: true, passive: true}));
+// the gestures WebKit counts as user activation; active (not passive) listeners
+["pointerdown", "touchend", "click", "keydown"].forEach(ev => document.addEventListener(ev, unlockAudio, {capture: true}));
 function tone(f, d, type = "sine", v = .1, slide = 0, when = 0, bus) { if (!S.sound && !bus) return; const a = ac(); if (!a) return; const t = a.currentTime + when; const o = a.createOscillator(), g = a.createGain(); o.type = type; o.frequency.setValueAtTime(f, t); if (slide) o.frequency.exponentialRampToValueAtTime(Math.max(30, f * slide), t + d); g.gain.setValueAtTime(v, t); g.gain.exponentialRampToValueAtTime(.001, t + d); o.connect(g).connect(bus || SFX_BUS); o.start(t); o.stop(t + d + .02); }
 const NOISE = {};
 function noiseBuf(d) { const a = ac(); const k = Math.round(d * 100); if (NOISE[k]) return NOISE[k]; const n = a.createBuffer(1, Math.max(1, a.sampleRate * d), a.sampleRate), ch = n.getChannelData(0); for (let i = 0; i < ch.length; i++) ch[i] = Math.random() * 2 - 1; return NOISE[k] = n; }
